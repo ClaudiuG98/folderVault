@@ -1,4 +1,5 @@
 using FolderVault.App;
+using FolderVault.Core.Model;
 using FolderVault.Core.Shell;
 
 namespace FolderVault.Services;
@@ -8,7 +9,12 @@ public enum AutoLockReason
 {
     IdleTimeout,
     ExplorerClosed,
+
+    /// <summary>The screen was locked or the user switched away. A vault can opt out of this.</summary>
     SessionLocked,
+
+    /// <summary>Windows is signing out or shutting down. No vault may opt out of this.</summary>
+    WindowsClosing,
 }
 
 /// <summary>
@@ -97,11 +103,20 @@ public sealed class AutoLockService : IDisposable
         }
     }
 
-    /// <summary>Re-locks everything now, used when the Windows session locks or signs out.</summary>
+    /// <summary>
+    /// Re-locks everything now, used when the Windows session locks or ends.
+    ///
+    /// <see cref="AutoLockReason.SessionLocked"/> honours each vault's
+    /// <see cref="Vault.LockOnSessionLock"/>; <see cref="AutoLockReason.WindowsClosing"/> does
+    /// not, because there is no "later" to defer to once Windows is gone.
+    /// </summary>
     public void LockAll(AutoLockReason reason)
     {
         foreach (var session in _sessions())
+        {
+            if (reason == AutoLockReason.SessionLocked && !session.Vault.LockOnSessionLock) continue;
             LockRequested?.Invoke(session, reason);
+        }
     }
 
     private void Poll()
@@ -129,8 +144,12 @@ public sealed class AutoLockService : IDisposable
             {
                 if (isOpen)
                 {
+                    // Deliberately does NOT count as activity. An open window used to call
+                    // Touch() here, which reset the idle clock every three seconds and meant a
+                    // folder left open on screen never timed out - not after fifteen minutes, not
+                    // ever. A window sitting open is not someone using the folder; it is the exact
+                    // case the idle timeout exists to catch.
                     _missedWindowChecks.Remove(session.Vault.Id);
-                    session.Touch();
                     continue;
                 }
 

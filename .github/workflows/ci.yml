@@ -1,0 +1,39 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    # Windows only, and not incidentally: the tests exercise IShellLink, IFolderView, DPAPI and
+    # NTFS ACLs against the real shell rather than mocking them, which is the point of having them.
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore
+        run: dotnet restore FolderVault.sln
+
+      - name: Build
+        run: dotnet build FolderVault.sln -c Release --no-restore
+
+      - name: Test
+        run: dotnet test FolderVault.sln -c Release --no-build --verbosity normal
+
+      - name: Publish
+        run: >
+          dotnet publish src/FolderVault/FolderVault.csproj -c Release -r win-x64
+          --self-contained false -p:PublishSingleFile=true -o publish
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FolderVault
+          path: publish/FolderVault.exe

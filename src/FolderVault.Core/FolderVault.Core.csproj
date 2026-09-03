@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>net8.0-windows</TargetFramework>
@@ -6,11 +6,20 @@
     <Nullable>enable</Nullable>
     <LangVersion>latest</LangVersion>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <!-- Not for any UI: this is how a library references the Windows Desktop framework, which is
+         where System.Drawing lives. Taking it from the framework rather than the NuGet package
+         keeps it out of the single-file bundle - the app already ships WinForms, so it costs
+         nothing, whereas the package added some 600 KB to the exe. -->
+    <UseWindowsForms>true</UseWindowsForms>
   </PropertyGroup>
 
   <ItemGroup>
     <!-- DPAPI is not in the box on modern .NET; this package provides ProtectedData. -->
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="FolderVault.Tests" />
   </ItemGroup>
 
 </Project>

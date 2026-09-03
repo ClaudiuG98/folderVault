@@ -1,3 +1,4 @@
+﻿using System.Runtime.InteropServices;
 using FolderVault.Core.Model;
 
 namespace FolderVault.UI;
@@ -175,8 +176,47 @@ public sealed class PasswordPrompt : Form
         base.OnShown(e);
         _restPosition = Location;
         BringToFront();
-        Activate();
+        TakeForeground();
         _secret.Focus();
+    }
+
+    /// <summary>
+    /// Claims the foreground so the box can actually be typed into.
+    ///
+    /// <para><see cref="Form.Activate"/> alone is not enough. A double-click on a locked folder is
+    /// served by the long-running instance, which is usually not the foreground process at that
+    /// moment - Explorer, or whatever the user was last in, is - and Windows refuses
+    /// <c>SetForegroundWindow</c> from a background process without a word. The window still
+    /// appears, because it is topmost, so the prompt looks ready while every keystroke goes to the
+    /// window behind it. That was the bug: typeable when FolderVault happened to already be in
+    /// front, dead otherwise.</para>
+    ///
+    /// <para>The courier passes on its right to take the foreground before it exits (see
+    /// <c>SingleInstance.SendToPrimary</c>), which covers the ordinary double-click. It is not
+    /// enough on its own though - the courier only has that right if whatever launched it had it -
+    /// so this also briefly attaches to the foreground window's input queue. Two threads sharing
+    /// an input queue share the right to set focus within it, which is the documented way to take
+    /// the foreground when asking politely is refused. The attachment is undone immediately;
+    /// leaving it in place would tie this app's message loop to another process's.</para>
+    /// </summary>
+    private void TakeForeground()
+    {
+        var foreground = GetForegroundWindow();
+        var thisThread = GetCurrentThreadId();
+        var foregroundThread = foreground == nint.Zero ? thisThread : GetWindowThreadProcessId(foreground, out _);
+
+        var attached = foregroundThread != thisThread
+                       && AttachThreadInput(thisThread, foregroundThread, true);
+        try
+        {
+            Activate();
+            BringWindowToTop(Handle);
+            SetForegroundWindow(Handle);
+        }
+        finally
+        {
+            if (attached) AttachThreadInput(thisThread, foregroundThread, false);
+        }
     }
 
     protected override void OnKeyDown(KeyEventArgs e)
@@ -254,7 +294,7 @@ public sealed class PasswordPrompt : Form
         // Put the caret back in the box and make sure the window still owns the keyboard:
         // disabling the focused control while validating hands focus away, and without this the
         // next keystrokes go to whatever window picked it up.
-        Activate();
+        TakeForeground();
         _secret.SelectAll();
         _secret.Focus();
         Shake();
@@ -334,4 +374,26 @@ public sealed class PasswordPrompt : Form
             return parameters;
         }
     }
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetForegroundWindow(nint hWnd);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool BringWindowToTop(nint hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern nint GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(nint hWnd, out uint processId);
+
+    [DllImport("kernel32.dll")]
+    private static extern uint GetCurrentThreadId();
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool AttachThreadInput(uint attachTo, uint attachFrom,
+        [MarshalAs(UnmanagedType.Bool)] bool attach);
 }

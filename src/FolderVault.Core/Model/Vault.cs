@@ -41,11 +41,22 @@ public sealed class Vault
 
     // ---- Auto-lock policy ----
 
-    /// <summary>Re-lock this many minutes after unlocking. Zero disables the idle timer.</summary>
+    /// <summary>Re-lock after this many minutes without activity. Zero disables the idle timer.</summary>
     public int IdleLockMinutes { get; set; } = 15;
 
     /// <summary>Re-lock once no Explorer window remains open under the folder.</summary>
     public bool LockOnExplorerClose { get; set; } = true;
+
+    /// <summary>
+    /// Re-lock when Windows locks or the user switches away. Turning all three rules off is what
+    /// "leave it open until I say otherwise" means; signing out and shutting down still lock,
+    /// because that is the last moment anything can.
+    /// </summary>
+    public bool LockOnSessionLock { get; set; } = true;
+
+    /// <summary>True when nothing will re-lock this vault on its own while Windows stays signed in.</summary>
+    [JsonIgnore]
+    public bool StaysUnlocked => IdleLockMinutes <= 0 && !LockOnExplorerClose && !LockOnSessionLock;
 
     public DateTimeOffset CreatedUtc { get; set; } = DateTimeOffset.UtcNow;
 

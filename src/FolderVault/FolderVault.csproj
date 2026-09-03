@@ -10,6 +10,10 @@
     <AssemblyName>FolderVault</AssemblyName>
     <RootNamespace>FolderVault</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- The icon Explorer shows for the exe, and the one a taskbar pin keeps. Windows reads it
+         from the file's resources before any code runs, so unlike the tray and window icons it
+         cannot be drawn at startup. Generated from that same drawing by AppIcon.WriteIcoFile. -->
+    <ApplicationIcon>app.ico</ApplicationIcon>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
   </PropertyGroup>

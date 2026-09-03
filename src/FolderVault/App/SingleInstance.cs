@@ -1,4 +1,5 @@
 using System.IO.Pipes;
+using System.Runtime.InteropServices;
 using System.Text;
 
 namespace FolderVault.App;
@@ -47,9 +48,23 @@ public sealed class SingleInstance : IDisposable
         return null;
     }
 
-    /// <summary>Hands a command line to the already-running instance. False if it did not answer.</summary>
+    /// <summary>
+    /// Hands a command line to the already-running instance. False if it did not answer.
+    ///
+    /// <para>Also hands over this process's right to take the foreground, which is what makes the
+    /// password prompt typeable. Windows only lets the foreground process - or one it has
+    /// explicitly granted permission - call <c>SetForegroundWindow</c>; every other caller is
+    /// refused silently. Explorer grants that right to whatever it launches, so this courier has
+    /// it and the long-running instance does not. Without passing it on, the prompt appears (it
+    /// is topmost) but keyboard focus stays wherever it was, and the box quietly eats every
+    /// keystroke.</para>
+    /// </summary>
     public static bool SendToPrimary(string[] args)
     {
+        // ASFW_ANY rather than a specific process id: this courier is about to exit, and it has
+        // no way to learn the primary's id without another round trip over the same pipe.
+        AllowSetForegroundWindow(AsfwAny);
+
         try
         {
             using var client = new NamedPipeClientStream(".", PipeName, PipeDirection.Out);
@@ -120,4 +135,11 @@ public sealed class SingleInstance : IDisposable
 
         _mutex.Dispose();
     }
+
+    /// <summary>Relinquish the foreground right to every process, ASFW_ANY.</summary>
+    private const int AsfwAny = -1;
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool AllowSetForegroundWindow(int dwProcessId);
 }

@@ -1,3 +1,4 @@
+﻿using FolderVault.Core.Shell;
 using FolderVault.Core.Store;
 
 namespace FolderVault.Core.Ops;
@@ -84,6 +85,12 @@ public static class FastLocker
         try
         {
             Directory.Move(source, destination);
+
+            // Directory.Move is plain file I/O and announces nothing. Explorer refreshes a view
+            // when it is told to, so without this the folder keeps showing at the path it just
+            // left, and the one that just arrived cannot be found in a view at all.
+            ShellChange.DirectoryRemoved(source);
+            ShellChange.DirectoryCreated(destination);
         }
         catch (IOException ex) when (IsSharingViolation(ex))
         {

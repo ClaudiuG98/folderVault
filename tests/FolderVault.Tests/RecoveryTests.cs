@@ -1,4 +1,4 @@
-using FolderVault.Core.Model;
+﻿using FolderVault.Core.Model;
 using FolderVault.Core.Ops;
 using FolderVault.Core.Store;
 using Xunit;
@@ -212,6 +212,39 @@ public class RecoveryTests
     }
 
     // ---- helpers ----
+
+    [Theory]
+    [InlineData(VaultMode.Fast)]
+    [InlineData(VaultMode.Secure)]
+    public void CrashAfterDecoyRemoved_BeforeFolderRestored_StaysLocked(VaultMode mode)
+    {
+        // Unlock removes the decoy before moving the folder back, so that the desktop never sees
+        // a folder and a same-named .lnk at once - while it does, it surfaces only one of them
+        // and the returning folder cannot be put back where the user had it.
+        //
+        // That ordering opens a window with no decoy and no folder, so it has to recover as
+        // cleanly as the old one. It does, because the decoy records nothing: the payload's
+        // location is what says whether the vault is locked, and it is still in the store.
+        using var ctx = new VaultTestContext();
+        VaultTestContext.BuildSampleTree(ctx.FolderPath);
+        var before = VaultTestContext.Snapshot(ctx.FolderPath);
+
+        var (vault, _) = ctx.Service.Create(ctx.FolderPath, mode, Password);
+        ctx.Track(vault.Id);
+
+        ShortcutFactoryDeleteDecoy(vault);
+        MarkInterrupted(ctx, vault, VaultState.Unlocking, JournalOperation.Unlock);
+
+        var result = ctx.Service.Recover(vault);
+
+        Assert.False(result.NeedsUserDecision);
+        Assert.Equal(VaultState.Locked, result.State);
+        Assert.True(File.Exists(vault.ShortcutPath), "Recovery should have rebuilt the decoy.");
+        Assert.False(Directory.Exists(ctx.FolderPath), "The payload should still be in the store.");
+
+        ctx.Service.Unlock(vault, VaultService.DeriveDek(vault, Password));
+        Assert.Equal(before.Files, VaultTestContext.Snapshot(ctx.FolderPath).Files);
+    }
 
     private static void ShortcutFactoryDeleteDecoy(Vault vault) =>
         FolderVault.Core.Shell.ShortcutFactory.Delete(vault.ShortcutPath);

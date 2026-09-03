@@ -1,4 +1,4 @@
-using FolderVault.Core.Model;
+﻿using FolderVault.Core.Model;
 using FolderVault.Core.Ops;
 using FolderVault.Core.Shell;
 using Xunit;
@@ -34,7 +34,7 @@ public class RelocationTests
 
         Assert.Equal(stalePath, ShortcutFactory.TryReadTarget(vault.ShortcutPath));
 
-        Assert.True(ctx.Service.RepairDecoy(vault), "A stale decoy should report that it was repaired.");
+        Assert.Equal(DecoyRepair.Retargeted, ctx.Service.RepairDecoy(vault));
         Assert.Equal(VaultService.LauncherPath, ShortcutFactory.TryReadTarget(vault.ShortcutPath));
 
         // It still opens the right vault afterwards.
@@ -50,7 +50,7 @@ public class RelocationTests
         var (vault, _) = ctx.Service.Create(ctx.FolderPath, VaultMode.Fast, Password);
         ctx.Track(vault.Id);
 
-        Assert.False(ctx.Service.RepairDecoy(vault), "A correct decoy should not be rewritten.");
+        Assert.Equal(DecoyRepair.None, ctx.Service.RepairDecoy(vault));
     }
 
     [Fact]
@@ -64,7 +64,7 @@ public class RelocationTests
 
         File.Delete(vault.ShortcutPath);
 
-        Assert.True(ctx.Service.RepairDecoy(vault));
+        Assert.Equal(DecoyRepair.Retargeted, ctx.Service.RepairDecoy(vault));
         Assert.True(File.Exists(vault.ShortcutPath));
     }
 
@@ -78,8 +78,32 @@ public class RelocationTests
         ctx.Track(vault.Id);
         ctx.Service.Unlock(vault, VaultService.DeriveDek(vault, Password));
 
-        Assert.False(ctx.Service.RepairDecoy(vault));
+        Assert.Equal(DecoyRepair.None, ctx.Service.RepairDecoy(vault));
         Assert.False(File.Exists(vault.ShortcutPath), "An unlocked folder must not sprout a shortcut.");
+    }
+
+    [Fact]
+    public void ADecoyFromAnOlderBuild_GetsTheCurrentIcon()
+    {
+        using var ctx = new VaultTestContext();
+        VaultTestContext.BuildSampleTree(ctx.FolderPath);
+
+        var (vault, _) = ctx.Service.Create(ctx.FolderPath, VaultMode.Fast, Password);
+        ctx.Track(vault.Id);
+
+        // What an older build wrote: the right target, but the bare stock folder icon.
+        ShortcutFactory.CreateWithIcon(vault.ShortcutPath, VaultService.LauncherPath,
+            $"--unlock {vault.Id:N}", "old build",
+            Environment.ExpandEnvironmentVariables(DecoyIcon.StockFolderIconLocation),
+            DecoyIcon.StockFolderIconIndex);
+
+        Assert.Equal(DecoyRepair.Reiconed, ctx.Service.RepairDecoy(vault));
+
+        var icon = ShortcutFactory.TryReadIconLocation(vault.ShortcutPath);
+        Assert.Equal(DecoyIcon.Path, icon!.Value.Location, ignoreCase: true);
+
+        // Re-pointing an executable is worth a notification; a refreshed icon is not.
+        Assert.DoesNotContain(vault.Id, ctx.Service.RepairAllDecoys().Select(v => v.Id));
     }
 
     [Fact]

@@ -9,6 +9,19 @@ namespace FolderVault.Core.Ops;
 /// <summary>Result of inspecting a vault whose last operation did not finish.</summary>
 public sealed record RecoveryResult(VaultState State, string Summary, bool NeedsUserDecision = false);
 
+/// <summary>What, if anything, a locked vault's decoy shortcut needed on startup.</summary>
+public enum DecoyRepair
+{
+    /// <summary>It was already correct.</summary>
+    None,
+
+    /// <summary>It pointed at an executable that had moved, so double-clicking it did nothing.</summary>
+    Retargeted,
+
+    /// <summary>It was written by an older build and wore that build's icon.</summary>
+    Reiconed,
+}
+
 /// <summary>
 /// Orchestrates everything a vault can do: create, lock, unlock, change password, recover.
 ///
@@ -164,6 +177,10 @@ public sealed class VaultService(VaultRegistry registry)
         Journal.Write(store, journal);
         SetState(vault, VaultState.Locking);
 
+        // Read before the folder goes anywhere: once it has moved, the desktop has already
+        // forgotten where it was.
+        var desktopPosition = DesktopIcons.TryGetPosition(vault.OriginalPath);
+
         try
         {
             VaultLayout.DiscardPartials(store);
@@ -185,6 +202,8 @@ public sealed class VaultService(VaultRegistry registry)
 
             Journal.Step(store, journal, "creating shortcut");
             CreateDecoy(vault);
+
+            if (desktopPosition is { } position) DesktopIcons.TryPlaceAt(vault.ShortcutPath, position);
 
             SetState(vault, VaultState.Locked);
             Journal.Clear(store);
@@ -216,6 +235,9 @@ public sealed class VaultService(VaultRegistry registry)
         Journal.Write(store, journal);
         SetState(vault, VaultState.Unlocking);
 
+        // The decoy is about to be deleted; capture where the user had it before it goes.
+        var desktopPosition = DesktopIcons.TryGetPosition(vault.ShortcutPath);
+
         try
         {
             VaultLayout.DiscardPartials(store);
@@ -226,8 +248,22 @@ public sealed class VaultService(VaultRegistry registry)
                 SecureLocker.Decrypt(store, dek, progress, ct);
             }
 
+            // The decoy goes before the folder comes back, not after. While a folder and a
+            // .lnk of the same displayed name both sit on the desktop, Explorer surfaces only one
+            // of them, and the other cannot be found or positioned - so the returning folder would
+            // keep whatever slot Explorer picked for it. Removing the decoy first leaves the view
+            // a clean remove-then-add.
+            //
+            // It costs nothing in safety. The decoy is not a record of anything; the payload's
+            // location is. A crash between here and the move below leaves the payload in the
+            // store, which is exactly what recovery reads as "locked" - and it rebuilds the decoy.
+            Journal.Step(store, journal, "removing shortcut");
+            ShortcutFactory.Delete(vault.ShortcutPath);
+
             Journal.Step(store, journal, "moving folder back");
             FastLocker.Restore(vault.OriginalPath, store, removeAcl: vault.Mode == VaultMode.Fast, progress);
+
+            if (desktopPosition is { } position) DesktopIcons.TryPlaceAt(vault.OriginalPath, position);
 
             if (vault.Mode == VaultMode.Secure)
             {
@@ -236,9 +272,6 @@ public sealed class VaultService(VaultRegistry registry)
                 Journal.Step(store, journal, "removing encrypted copy");
                 AtomicFile.DeleteDirectory(VaultLayout.Encrypted(store));
             }
-
-            Journal.Step(store, journal, "removing shortcut");
-            ShortcutFactory.Delete(vault.ShortcutPath);
 
             vault.UnlockedAtUtc = DateTimeOffset.UtcNow;
             SetState(vault, VaultState.Unlocked);
@@ -287,8 +320,10 @@ public sealed class VaultService(VaultRegistry registry)
                 // being verified. The safe move is to put it back and let the user re-lock;
                 // nothing is lost because this copy was never deleted.
                 AtomicFile.DeleteDirectory(VaultLayout.Encrypted(store));
-                FastLocker.Restore(vault.OriginalPath, store, removeAcl: false);
+                // Decoy first, then the folder - the same ordering Unlock uses, and for the same
+                // reason: a folder and its same-named decoy must not be on the desktop at once.
                 ShortcutFactory.Delete(vault.ShortcutPath);
+                FastLocker.Restore(vault.OriginalPath, store, removeAcl: false);
                 SetState(vault, VaultState.Unlocked);
                 Journal.Clear(store);
                 return new RecoveryResult(VaultState.Unlocked,
@@ -333,28 +368,45 @@ public sealed class VaultService(VaultRegistry registry)
     }
 
     /// <summary>
-    /// Makes sure a locked vault's decoy shortcut points at the executable that is running now,
-    /// rewriting it if not. Returns true if it had to be repaired.
+    /// Makes sure a locked vault's decoy shortcut points at the executable that is running now
+    /// and wears the current icon, rewriting it if not. Returns true if it had to be repaired.
     ///
     /// A .lnk stores an absolute path, so moving, renaming or reinstalling FolderVault leaves
     /// every locked folder standing in front of an executable that is no longer there: the
     /// decoy still looks like a folder but double-clicking it does nothing. Re-pointing them at
     /// startup keeps the app relocatable.
+    ///
+    /// The icon is checked for the same reason in reverse: a folder locked by an older build
+    /// wears whatever that build drew, and would keep it until the next lock. Comparing here
+    /// means an upgrade brings existing decoys up to date on first launch.
     /// </summary>
-    public bool RepairDecoy(Vault vault)
+    public DecoyRepair RepairDecoy(Vault vault)
     {
-        if (vault.State != VaultState.Locked) return false;
+        if (vault.State != VaultState.Locked) return DecoyRepair.None;
 
         var target = ShortcutFactory.TryReadTarget(vault.ShortcutPath);
-        if (target is not null &&
-            string.Equals(target, LauncherPath, StringComparison.OrdinalIgnoreCase))
-            return false;
+        if (target is null ||
+            !string.Equals(target, LauncherPath, StringComparison.OrdinalIgnoreCase))
+        {
+            CreateDecoy(vault);
+            return DecoyRepair.Retargeted;
+        }
+
+        var (expectedIcon, expectedIndex) = DecoyIcon.ForShortcut();
+        var icon = ShortcutFactory.TryReadIconLocation(vault.ShortcutPath);
+        if (icon is not null && icon.Value.Index == expectedIndex &&
+            string.Equals(icon.Value.Location, expectedIcon, StringComparison.OrdinalIgnoreCase))
+            return DecoyRepair.None;
 
         CreateDecoy(vault);
-        return true;
+        return DecoyRepair.Reiconed;
     }
 
-    /// <summary>Repairs every locked vault's decoy. Returns the ones that needed it.</summary>
+    /// <summary>
+    /// Repairs every locked vault's decoy. Returns only the ones that had to be re-pointed at a
+    /// moved executable - the case worth telling the user about. A refreshed icon is invisible
+    /// housekeeping and is done silently.
+    /// </summary>
     public List<Vault> RepairAllDecoys()
     {
         var repaired = new List<Vault>();
@@ -363,7 +415,7 @@ public sealed class VaultService(VaultRegistry registry)
         {
             try
             {
-                if (RepairDecoy(vault)) repaired.Add(vault);
+                if (RepairDecoy(vault) == DecoyRepair.Retargeted) repaired.Add(vault);
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or
                                            System.Runtime.InteropServices.COMException)

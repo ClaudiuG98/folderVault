@@ -21,6 +21,9 @@ public sealed class FolderVaultContext : ApplicationContext
     private readonly VaultRegistry _registry = new();
     private readonly VaultService _service;
     private readonly Dictionary<Guid, UnlockedSession> _sessions = [];
+
+    /// <summary>Vaults being encrypted on a worker thread right now. UI thread only.</summary>
+    private readonly HashSet<Guid> _lockingInBackground = [];
     private readonly AutoLockService _autoLock;
     private readonly NotifyIcon _tray;
     private readonly Control _uiMarshal;
@@ -55,7 +58,8 @@ public sealed class FolderVaultContext : ApplicationContext
         _autoLock = new AutoLockService(() => _sessions.Values.ToList());
         _autoLock.LockRequested += OnAutoLockRequested;
 
-        SystemEvents.SessionLockOrLogoff += () => _autoLock.LockAll(AutoLockReason.SessionLocked);
+        SystemEvents.SessionLocked += () => _autoLock.LockAll(AutoLockReason.SessionLocked);
+        SystemEvents.SessionEnding += () => _autoLock.LockAll(AutoLockReason.WindowsClosing);
 
         RunStartupRecovery();
         RepairMovedShortcuts();
@@ -67,6 +71,13 @@ public sealed class FolderVaultContext : ApplicationContext
     public VaultRegistry Registry => _registry;
 
     public bool IsUnlocked(Guid vaultId) => _sessions.ContainsKey(vaultId);
+
+    /// <summary>
+    /// True while a folder is being re-encrypted quietly in the background. The manager uses this
+    /// to say "Locking" rather than "Interrupted" - the vault really is mid-operation, but this
+    /// one is deliberate and under way, not the wreckage of a crash.
+    /// </summary>
+    public bool IsLockingInBackground(Guid vaultId) => _lockingInBackground.Contains(vaultId);
 
     /// <summary>Acts on a command line, whether this process's own or one forwarded to it.</summary>
     public void HandleArgs(string[] args)
@@ -218,6 +229,12 @@ public sealed class FolderVaultContext : ApplicationContext
             return;
         }
 
+        if (ShouldLockQuietly(vault.Mode, reason))
+        {
+            LockQuietly(vault, session!, reason!.Value);
+            return;
+        }
+
         try
         {
             if (vault.Mode == VaultMode.Secure)
@@ -247,10 +264,111 @@ public sealed class FolderVaultContext : ApplicationContext
         }
     }
 
+    /// <summary>
+    /// Whether a lock should run quietly in the background instead of behind a progress dialog.
+    ///
+    /// <para>Three conditions, and each carries its weight. <b>Secure only</b>: Fast mode is a
+    /// directory rename measured in milliseconds, so there is nothing to show progress for and
+    /// nothing to move off the UI thread. <b>A reason is set</b>: that is what distinguishes an
+    /// auto-lock from the user pressing Lock, and someone who pressed Lock is waiting for it and
+    /// should see it happening. <b>Not shutting down</b>: at sign-out, getting the encryption
+    /// finished beats staying out of the way, and no one is looking at the screen to be
+    /// interrupted.</para>
+    /// </summary>
+    internal static bool ShouldLockQuietly(VaultMode mode, AutoLockReason? reason) =>
+        mode == VaultMode.Secure && reason is not null and not AutoLockReason.WindowsClosing;
+
+    /// <summary>
+    /// Re-encrypts a folder in the background, with no window and no progress bar - just the tray
+    /// icon and, when it finishes, the same notification every auto-lock gives.
+    ///
+    /// <para>An idle timeout or a closed Explorer window fires while the user is busy with
+    /// something else entirely. A modal progress dialog there lands on top of whatever they were
+    /// doing, cannot be dismissed, and steals the keyboard for as long as encryption takes. They
+    /// did not ask for it, so it should not interrupt them.</para>
+    ///
+    /// <para>It cannot simply run on the UI thread without the dialog either: encryption is the
+    /// one operation here measured in minutes, and that would freeze the tray into "Not
+    /// Responding". So it goes to a worker thread, and everything that touches state comes back to
+    /// the UI thread afterwards.</para>
+    /// </summary>
+    private void LockQuietly(Vault vault, UnlockedSession session, AutoLockReason reason)
+    {
+        // The auto-lock poller keeps ticking while this runs and would happily ask again a few
+        // seconds later, starting a second encryption over the first.
+        if (!_lockingInBackground.Add(vault.Id)) return;
+
+        _autoLock.StopTrackingActivity(vault.Id);
+        RefreshUi();
+
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                _service.Lock(vault, session.Dek);
+                return null as Exception;
+            }
+            catch (Exception ex)
+            {
+                // Every exception is caught, not just the expected three. This is a worker thread
+                // with no progress dialog to rethrow through and no UI handler above it, so
+                // anything that escaped here would leave the folder open and say nothing at all.
+                return ex;
+            }
+        }).ContinueWith(finished => OnUiThread(() =>
+        {
+            _lockingInBackground.Remove(vault.Id);
+
+            if (finished.Result is { } failure)
+            {
+                // The folder is still open and still tracked, so the next poll will try again -
+                // which is what should happen when the reason was a file being in use.
+                _autoLock.TrackActivity(session);
+                RefreshUi();
+                Notify($"Could not lock {vault.DisplayName}", failure.Message, ToolTipIcon.Warning);
+                return;
+            }
+
+            ReleaseSession(vault.Id);
+            RefreshUi();
+            NotifyLocked(vault, reason);
+        }), TaskScheduler.Default);
+    }
+
     public void LockAll()
     {
         foreach (var vault in _sessions.Values.Select(s => s.Vault).ToList())
             Lock(vault);
+    }
+
+    /// <summary>
+    /// Saves a vault's auto-lock policy and applies it to the folder if it is open right now.
+    ///
+    /// Both halves are needed. An open vault's <see cref="Vault"/> lives inside its
+    /// <see cref="UnlockedSession"/>, and that is the instance the idle timer and the
+    /// Explorer-close watcher actually read; the manager window holds a separate copy reloaded
+    /// from the registry. Writing only the registry would leave a folder the user just set to
+    /// "stay open" locking itself a minute later on the old timeout.
+    /// </summary>
+    public void UpdateAutoLockPolicy(Guid vaultId, int idleMinutes, bool onExplorerClose, bool onSessionLock)
+    {
+        var stored = FindKnownVault(vaultId);
+        if (stored is null) return;
+
+        Apply(stored);
+        _registry.Upsert(stored);
+
+        if (_sessions.TryGetValue(vaultId, out var session)) Apply(session.Vault);
+
+        RefreshUi();
+        return;
+
+        void Apply(Vault vault)
+        {
+            vault.IdleLockMinutes = idleMinutes;
+            vault.LockOnExplorerClose = onExplorerClose;
+            vault.LockOnSessionLock = onSessionLock;
+        }
     }
 
     private void OnAutoLockRequested(UnlockedSession session, AutoLockReason reason) => OnUiThread(() =>
@@ -265,6 +383,7 @@ public sealed class FolderVaultContext : ApplicationContext
         {
             AutoLockReason.IdleTimeout => $"No activity for {vault.IdleLockMinutes} minutes.",
             AutoLockReason.ExplorerClosed => "The Explorer window was closed.",
+            AutoLockReason.WindowsClosing => "Windows is signing out.",
             _ => "You locked Windows.",
         },
         ToolTipIcon.Info);

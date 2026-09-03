@@ -1,4 +1,4 @@
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 using System.Text;
 
 namespace FolderVault.Core.Shell;
@@ -9,25 +9,32 @@ namespace FolderVault.Core.Shell;
 /// A locked folder is replaced by <c>&lt;name&gt;.lnk</c> pointing at FolderVault. Explorer
 /// registers <c>NeverShowExt</c> for the <c>lnkfile</c> type, so the <c>.lnk</c> suffix is never
 /// rendered - even with "show file extensions" enabled - and a shortcut named <c>Photos.lnk</c>
-/// displays as exactly <c>Photos</c>. Given the standard folder icon from imageres.dll it reads
-/// as a folder; the only tell is the shortcut arrow overlay, which
-/// <see cref="ShellArrowOverlay"/> can optionally suppress.
+/// displays as exactly <c>Photos</c>. It wears the standard folder icon with a padlock badge (see
+/// <see cref="DecoyIcon"/>), so it reads as a folder that is locked; the remaining tell is the
+/// shortcut arrow overlay, which <see cref="ShellArrowOverlay"/> can optionally replace.
 /// </summary>
 public static class ShortcutFactory
 {
-    /// <summary>The stock closed-folder icon that Explorer itself uses.</summary>
-    public const string FolderIconLocation = @"%SystemRoot%\System32\imageres.dll";
-
-    public const int FolderIconIndex = 3;
-
     public static void Create(string shortcutPath, string targetExe, string arguments, string description)
+    {
+        var (location, index) = DecoyIcon.ForShortcut();
+        CreateWithIcon(shortcutPath, targetExe, arguments, description, location, index);
+    }
+
+    /// <summary>
+    /// Writes a decoy wearing a named icon rather than the current one. Exists so tests can
+    /// reproduce a shortcut left behind by an older build, which is what
+    /// <c>VaultService.RepairDecoy</c> has to notice and bring up to date.
+    /// </summary>
+    internal static void CreateWithIcon(string shortcutPath, string targetExe, string arguments,
+        string description, string iconLocation, int iconIndex)
     {
         var link = (IShellLinkW)new ShellLink();
 
         link.SetPath(targetExe);
         link.SetArguments(arguments);
         link.SetDescription(description);
-        link.SetIconLocation(Environment.ExpandEnvironmentVariables(FolderIconLocation), FolderIconIndex);
+        link.SetIconLocation(iconLocation, iconIndex);
 
         // Run from the exe's own directory: the shortcut stands where the locked folder was, and
         // that path does not exist while locked.
@@ -57,6 +64,26 @@ public static class ShortcutFactory
         }
     }
 
+    /// <summary>The icon a shortcut wears, or null if it cannot be read.</summary>
+    public static (string Location, int Index)? TryReadIconLocation(string shortcutPath)
+    {
+        if (!File.Exists(shortcutPath)) return null;
+
+        try
+        {
+            var link = (IShellLinkW)new ShellLink();
+            ((IPersistFile)link).Load(shortcutPath, 0);
+            var buffer = new StringBuilder(1024);
+            link.GetIconLocation(buffer, buffer.Capacity, out var index);
+            Marshal.ReleaseComObject(link);
+            return (buffer.ToString(), index);
+        }
+        catch (COMException)
+        {
+            return null;
+        }
+    }
+
     /// <summary>The executable a shortcut points at, or null if it cannot be read.</summary>
     public static string? TryReadTarget(string shortcutPath)
     {
@@ -79,7 +106,13 @@ public static class ShortcutFactory
 
     public static void Delete(string shortcutPath)
     {
-        if (File.Exists(shortcutPath)) File.Delete(shortcutPath);
+        if (!File.Exists(shortcutPath)) return;
+
+        File.Delete(shortcutPath);
+
+        // Create goes through IPersistFile, which tells the shell about itself; File.Delete does
+        // not, so say so explicitly or the decoy lingers in open views.
+        ShellChange.FileRemoved(shortcutPath);
     }
 
     // ---- COM interop. Method order below must match the vtable exactly. ----

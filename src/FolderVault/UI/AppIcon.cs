@@ -1,10 +1,18 @@
 using System.Drawing.Drawing2D;
+using FolderVault.Core.Shell;
 
 namespace FolderVault.UI;
 
 /// <summary>
-/// Draws the tray and window icon at runtime, so the project ships without binary assets and the
-/// icon stays crisp at whatever size Windows asks for.
+/// Draws the tray and window icon at runtime, so the icon stays crisp at whatever size Windows
+/// asks for and there is one definition of what the app looks like.
+///
+/// <para>The executable's own icon - the one Explorer shows for <c>FolderVault.exe</c>, and the
+/// one a taskbar pin keeps - cannot be drawn at runtime: Windows reads it out of the file's
+/// resources before anything runs. That icon is a real <c>.ico</c> committed at
+/// <c>src/FolderVault/app.ico</c> and named by <c>ApplicationIcon</c> in the project file. It is
+/// this same drawing, written out by <see cref="WriteIcoFile"/>, so the two cannot drift; if the
+/// artwork below changes, regenerate it.</para>
 /// </summary>
 public static class AppIcon
 {
@@ -15,7 +23,20 @@ public static class AppIcon
     {
         if (Cache.TryGetValue((size, open), out var cached)) return cached;
 
-        using var bitmap = new Bitmap(size, size);
+        using var bitmap = Render(size, open);
+        var icon = Icon.FromHandle(bitmap.GetHicon());
+        Cache[(size, open)] = icon;
+        return icon;
+    }
+
+    /// <summary>
+    /// The padlock as a bitmap at one size. Separate from <see cref="Get"/> because an
+    /// <see cref="Icon"/> built from an HICON cannot be read back as pixels, and writing an
+    /// <c>.ico</c> file needs the pixels.
+    /// </summary>
+    public static Bitmap Render(int size, bool open = false)
+    {
+        var bitmap = new Bitmap(size, size);
         using (var g = Graphics.FromImage(bitmap))
         {
             g.SmoothingMode = SmoothingMode.AntiAlias;
@@ -44,9 +65,29 @@ public static class AppIcon
             g.FillEllipse(holeBrush, body.X + (body.Width - hole) / 2, body.Y + 3.4f * scale, hole, hole);
         }
 
-        var icon = Icon.FromHandle(bitmap.GetHicon());
-        Cache[(size, open)] = icon;
-        return icon;
+        return bitmap;
+    }
+
+    /// <summary>
+    /// Writes the closed padlock to <paramref name="path"/> as a multi-resolution <c>.ico</c>, for
+    /// use as the executable's <c>ApplicationIcon</c>.
+    ///
+    /// Run this after changing the artwork above, then rebuild:
+    /// <code>AppIcon.WriteIcoFile(@"src\FolderVault\app.ico");</code>
+    /// The closed padlock is deliberate - the file icon says what the app is, not what state some
+    /// folder happens to be in.
+    /// </summary>
+    public static void WriteIcoFile(string path)
+    {
+        var frames = IconFile.StandardSizes.Select(size => Render(size)).ToList();
+        try
+        {
+            IconFile.Write(path, frames);
+        }
+        finally
+        {
+            foreach (var frame in frames) frame.Dispose();
+        }
     }
 
     private static GraphicsPath RoundedRect(RectangleF bounds, float radius)

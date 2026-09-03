@@ -1,4 +1,4 @@
-using FolderVault.App;
+﻿using FolderVault.App;
 using FolderVault.Core.Model;
 using FolderVault.Core.Ops;
 using FolderVault.Core.Shell;
@@ -47,10 +47,11 @@ public sealed class ManagerForm : Form
             Dock = DockStyle.Fill,
             BackColor = Theme.Panel,
         };
-        _list.Columns.Add("Folder", 200);
-        _list.Columns.Add("Location", 300);
-        _list.Columns.Add("Protection", 110);
-        _list.Columns.Add("State", 110);
+        _list.Columns.Add("Folder", 180);
+        _list.Columns.Add("Location", 250);
+        _list.Columns.Add("Protection", 100);
+        _list.Columns.Add("State", 90);
+        _list.Columns.Add("Auto-lock", 140);
         _list.SelectedIndexChanged += (_, _) => UpdateButtons();
         _list.DoubleClick += (_, _) => OpenSelected();
 
@@ -122,6 +123,7 @@ public sealed class ManagerForm : Form
         menu.Items.Add("Lock", null, (_, _) => LockSelected());
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Change password", null, (_, _) => ChangePasswordForSelected());
+        menu.Items.Add("Auto-lock...", null, (_, _) => ShowSettings());
         menu.Items.Add("Remove protection", null, (_, _) => RemoveSelected());
         menu.Opening += (_, e) => e.Cancel = SelectedVault() is null;
         return menu;
@@ -153,12 +155,16 @@ public sealed class ManagerForm : Form
         foreach (var vault in vaults.OrderBy(v => v.DisplayName, StringComparer.CurrentCultureIgnoreCase))
         {
             var unlocked = _context.IsUnlocked(vault.Id);
+            var busy = _context.IsLockingInBackground(vault.Id);
             var item = new ListViewItem(vault.DisplayName) { Tag = vault };
 
             item.SubItems.Add(Path.GetDirectoryName(vault.OriginalPath) ?? vault.OriginalPath);
             item.SubItems.Add(vault.Mode == VaultMode.Secure ? "Encrypted" : "Hidden");
-            item.SubItems.Add(DescribeState(vault, unlocked));
-            item.ForeColor = vault.NeedsRecovery ? Theme.Danger : Theme.Text;
+            item.SubItems.Add(DescribeState(vault, unlocked, busy));
+            item.SubItems.Add(AutoLockText.Summary(vault));
+
+            // Red is for a vault that needs a human. One that is mid-encryption on purpose does not.
+            item.ForeColor = vault.NeedsRecovery && !busy ? Theme.Danger : Theme.Text;
 
             _list.Items.Add(item);
             if (vault.Id == selectedId) item.Selected = true;
@@ -173,8 +179,11 @@ public sealed class ManagerForm : Form
         UpdateButtons();
     }
 
-    private static string DescribeState(Vault vault, bool unlocked) => vault.State switch
+    private static string DescribeState(Vault vault, bool unlocked, bool busy) => vault.State switch
     {
+        // A background auto-lock leaves the vault in the same transitional state a crash would,
+        // so the in-flight flag is the only thing that tells the two apart.
+        _ when busy => "Locking",
         VaultState.Locked => "Locked",
         VaultState.Unlocked when unlocked => "Open",
         VaultState.Unlocked => "Unlocked",
@@ -188,11 +197,14 @@ public sealed class ManagerForm : Form
     {
         var vault = SelectedVault();
         var unlocked = vault is not null && vault.State == VaultState.Unlocked;
+        var busy = vault is not null && _context.IsLockingInBackground(vault.Id);
 
-        _open.Enabled = vault is not null && !unlocked;
-        _lock.Enabled = unlocked;
-        _changePassword.Enabled = vault is not null;
-        _remove.Enabled = vault is not null;
+        // Nothing may act on a folder that is halfway through being encrypted - Open in
+        // particular would try to decrypt a payload that is still being written.
+        _open.Enabled = vault is not null && !unlocked && !busy;
+        _lock.Enabled = unlocked && !busy;
+        _changePassword.Enabled = vault is not null && !busy;
+        _remove.Enabled = vault is not null && !busy;
 
         _status.Text = _registryProblem is not null
             ? _registryProblem
@@ -334,28 +346,15 @@ public sealed class ManagerForm : Form
 
     private void ShowSettings()
     {
-        var suppressed = ShellArrowOverlay.IsSuppressed();
+        var vault = SelectedVault();
 
-        var choice = MessageBox.Show(this,
-            "Locked folders are stood in for by a shortcut wearing the folder icon. Windows draws a " +
-            "small arrow on every shortcut, which is the only visual difference from a real folder.\r\n\r\n" +
-            $"The arrow is currently {(suppressed ? "hidden" : "shown")}.\r\n\r\n" +
-            $"{(suppressed ? "Show" : "Hide")} it? This affects every shortcut on the PC, needs " +
-            "administrator approval, and restarts Explorer.",
-            "Shortcut arrows", MessageBoxButtons.OKCancel, MessageBoxIcon.Question);
+        using var dialog = new SettingsDialog(vault, vault is not null && _context.IsUnlocked(vault.Id));
+        if (dialog.ShowDialog(this) != DialogResult.OK || vault is null) return;
 
-        if (choice != DialogResult.OK) return;
+        _context.UpdateAutoLockPolicy(vault.Id, dialog.IdleLockMinutes,
+            dialog.LockOnExplorerClose, dialog.LockOnSessionLock);
 
-        if (!ShellArrowOverlay.TrySetSuppressed(!suppressed))
-        {
-            MessageBox.Show(this, "The change was not applied.", "Shortcut arrows",
-                MessageBoxButtons.OK, MessageBoxIcon.Information);
-            return;
-        }
-
-        if (MessageBox.Show(this, "Restart Explorer now to apply it?", "Shortcut arrows",
-                MessageBoxButtons.OKCancel, MessageBoxIcon.Question) == DialogResult.OK)
-            ShellArrowOverlay.RestartExplorer();
+        ReloadVaults();
     }
 
     private void Warn(string message, string title) =>
