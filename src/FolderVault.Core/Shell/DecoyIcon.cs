@@ -11,8 +11,8 @@ namespace FolderVault.Core.Shell;
 /// Explorer draws the shortcut arrow itself, over the bottom-left corner of whatever icon an item
 /// carries, and nothing a <c>.lnk</c> can say will stop it. So the badge sits bottom-<i>right</i>,
 /// where the two never collide - and where it reads as "this folder is locked" rather than as a
-/// rendering accident. <see cref="ShellArrowOverlay"/> can additionally replace the arrow itself,
-/// but that is a system-wide change and stays opt-in; this badge costs nothing and is always on.
+/// rendering accident. Hiding the arrow instead was tried twice and broke the whole machine both
+/// times (see <see cref="ShellTweakRepair"/>); this badge costs nothing and is always on.
 ///
 /// The file is composited at run time from the user's own <c>imageres.dll</c> and cached under
 /// <c>%LOCALAPPDATA%\FolderVault</c>. Generating rather than shipping it keeps the project free of

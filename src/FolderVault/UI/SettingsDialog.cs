@@ -4,8 +4,12 @@ using FolderVault.Core.Shell;
 namespace FolderVault.UI;
 
 /// <summary>
-/// Settings, in two scopes that are labelled as such because they are easy to confuse: when a
-/// folder re-locks goes per folder, and the shortcut arrow is a change to Windows itself.
+/// Settings: when a folder re-locks, set per folder and labelled as such because the scope is
+/// easy to mistake for machine-wide.
+///
+/// <para>It used to carry a second, machine-wide section for hiding the Windows shortcut arrow.
+/// That is gone - see <see cref="ShellTweakRepair"/> for why - and all that is left of it is a
+/// repair button, which only appears on a PC an older version already damaged.</para>
 ///
 /// <para>The re-lock rules are radio buttons, not tickboxes. They were tickboxes, and two of them
 /// ticked - which is the default, and the safest setting - read as a mistake rather than as a
@@ -31,8 +35,8 @@ public sealed class SettingsDialog : Form
     private readonly NumericUpDown _minutes;
     private readonly CheckBox _sessionLock;
     private readonly Label _summary;
-    private readonly Button _arrow;
-    private readonly Label _arrowState;
+    private readonly Button _repair;
+    private readonly Label _repairState;
 
     /// <summary>The rule the user settled on. Only meaningful when the dialog returns OK.</summary>
     public AutoLockRule Rule =>
@@ -126,25 +130,26 @@ public sealed class SettingsDialog : Form
                 "change when it re-locks.", ContentWidth));
         }
 
-        // ---- shortcut arrow, machine-wide ----
-        _arrowState = Theme.Wrapping(string.Empty, ContentWidth);
+        // ---- repairing an older FolderVault's machine-wide damage ----
+        // Only shown when there is something to repair. FolderVault no longer changes anything
+        // outside its own files, so on a healthy PC this section would be a heading over a
+        // sentence saying nothing is wrong - noise in a dialog that is otherwise all choices.
+        _repair = Theme.Action("Repair");
+        _repair.Click += (_, _) => Repair();
+        _repair.Margin = new Padding(0, 4, 8, 0);
 
-        _arrow = Theme.Action("Hide the arrow");
-        _arrow.Click += (_, _) => ToggleArrow();
-        _arrow.Margin = new Padding(0, 4, 8, 0);
+        _repairState = Theme.Wrapping(string.Empty, ContentWidth, color: Theme.Danger);
 
-        rows.Add(Theme.Heading("Shortcut arrows"));
-        rows.Add(Theme.Wrapping(
-            "A locked folder is stood in for by a shortcut wearing the folder icon with a padlock " +
-            "badge. Windows draws its own small arrow over every shortcut, which is the remaining " +
-            "visual difference from a real folder. Hiding it affects every shortcut on the PC, " +
-            "needs administrator approval, and restarts Explorer.", ContentWidth));
-        rows.Add(_arrowState);
-        rows.Add(_arrow);
+        if (ShellTweakRepair.NeedsRepair())
+        {
+            rows.Add(Theme.Heading("Repair Windows shortcuts"));
+            rows.Add(_repairState);
+            rows.Add(_repair);
+        }
 
         // ---- buttons ----
-        // With no folder selected there is nothing to save: the arrow toggle applies the moment
-        // it is clicked. Offering "Save" there would promise something this dialog cannot do.
+        // With no folder selected there is nothing to save: repair applies the moment it is
+        // clicked. Offering "Save" there would promise something this dialog cannot do.
         var ok = Theme.Action(vault is null ? "Close" : "Save", primary: true);
         ok.DialogResult = vault is null ? DialogResult.Cancel : DialogResult.OK;
 
@@ -190,7 +195,7 @@ public sealed class SettingsDialog : Form
         _sessionLock.CheckedChanged += (_, _) => UpdateSummary();
 
         UpdateSummary();
-        UpdateArrowState();
+        UpdateRepairState();
     }
 
     private static RadioButton Choice(string text, bool selected) => new()
@@ -262,43 +267,57 @@ public sealed class SettingsDialog : Form
                         (_isOpenNow ? " It is open now, so this takes effect immediately." : string.Empty);
     }
 
-    private void UpdateArrowState()
+    /// <summary>
+    /// Names the damage in the terms the user is actually seeing it in - a black square, or a pin
+    /// that will not launch - rather than as a registry value. Both can be present at once, on a
+    /// PC that ran both of the old implementations.
+    /// </summary>
+    private void UpdateRepairState()
     {
-        if (ShellArrowOverlay.TaskbarPinsAreBroken())
+        var blacked = ShellTweakRepair.ShortcutIconsAreBlacked();
+        var pins = ShellTweakRepair.TaskbarPinsAreBroken();
+
+        var problems = new List<string>();
+
+        if (blacked)
+            problems.Add(
+                "every shortcut on this PC has a black square where its arrow should be");
+
+        if (pins)
+            problems.Add(
+                "taskbar pins do not launch, reporting that the file has no app associated with it");
+
+        if (problems.Count == 0)
         {
-            _arrowState.ForeColor = Theme.Danger;
-            _arrowState.Text =
-                "Taskbar pins on this PC are broken - clicking one reports that the file has no app " +
-                "associated with it. An older FolderVault caused it. Use the button to repair.";
-            _arrow.Text = "Repair taskbar pins";
+            _repairState.Text = "Nothing to repair.";
+            _repair.Enabled = false;
             return;
         }
 
-        var suppressed = ShellArrowOverlay.IsSuppressed();
-        _arrowState.ForeColor = Theme.Muted;
-        _arrowState.Text = suppressed ? "The arrow is currently hidden." : "The arrow is currently shown.";
-        _arrow.Text = suppressed ? "Show the arrow" : "Hide the arrow";
+        _repairState.Text =
+            $"An older FolderVault changed Windows itself, and {string.Join(", and ", problems)}. " +
+            "Repairing puts Windows back to its default. It needs administrator approval and " +
+            "restarts Explorer.";
     }
 
-    private void ToggleArrow()
+    private void Repair()
     {
-        var broken = ShellArrowOverlay.TaskbarPinsAreBroken();
-
-        // Repairing means writing the arrow setting that is already in effect: the same call
-        // rewrites IsShortcut either way, so nothing else visibly changes.
-        var wanted = broken ? ShellArrowOverlay.IsSuppressed() : !ShellArrowOverlay.IsSuppressed();
-
-        if (!ShellArrowOverlay.TrySetSuppressed(wanted))
+        if (!ShellTweakRepair.TryRepair())
         {
-            MessageBox.Show(this, "The change was not applied.", "Shortcut arrows",
+            MessageBox.Show(this, "The repair was not applied.", "Repair Windows shortcuts",
                 MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
 
-        UpdateArrowState();
+        UpdateRepairState();
 
-        if (MessageBox.Show(this, "Restart Explorer now to apply it?", "Shortcut arrows",
+        // The registry is already correct at this point, but Explorer draws icons from a cache
+        // that still holds the black squares. Saying so is the difference between the user
+        // believing the repair worked and believing it did nothing.
+        if (MessageBox.Show(this,
+                "Repaired. Restart Explorer now to clear the icons already on screen?",
+                "Repair Windows shortcuts",
                 MessageBoxButtons.OKCancel, MessageBoxIcon.Question) == DialogResult.OK)
-            ShellArrowOverlay.RestartExplorer();
+            ShellTweakRepair.RestartExplorer();
     }
 }

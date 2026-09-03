@@ -11,7 +11,7 @@ namespace FolderVault.Core.Shell;
 /// rendered - even with "show file extensions" enabled - and a shortcut named <c>Photos.lnk</c>
 /// displays as exactly <c>Photos</c>. It wears the standard folder icon with a padlock badge (see
 /// <see cref="DecoyIcon"/>), so it reads as a folder that is locked; the remaining tell is the
-/// shortcut arrow overlay, which <see cref="ShellArrowOverlay"/> can optionally replace.
+/// shortcut arrow overlay, which Windows draws and which FolderVault leaves alone.
 /// </summary>
 public static class ShortcutFactory
 {

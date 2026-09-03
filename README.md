@@ -100,13 +100,32 @@ group and back. The padlock badge at least makes it easy to spot. The only way o
 decoy that is genuinely a directory, and a directory cannot show a password prompt when you
 double-click it; that is the shell namespace extension this project exists to avoid.
 
-**The shortcut arrow.** Optional, off by default, and system-wide: it points the shell's shortcut
-overlay (`Shell Icons` override `29`) at a blank icon Windows already ships. Do *not* do this the
-way most of the internet suggests, by deleting `IsShortcut` from `HKLM\Software\Classes\lnkfile`.
-That value is what tells the shell to resolve a `.lnk` to its target instead of opening it as a
-document, and without it every taskbar pin on the machine fails with *"This file does not have an
-app associated with it"* — Explorer's own views still work, which is what makes it confusing to
-diagnose. Turning the option on repairs `IsShortcut` if an earlier build removed it.
+**The shortcut arrow.** Windows draws a small arrow over every shortcut, and it is the last visual
+difference between a decoy and a real folder. FolderVault used to offer to hide it. **It no longer
+does, and it will not come back** — two implementations were tried and both broke the whole
+machine:
+
+1. Deleting `IsShortcut` from `HKLM\Software\Classes\lnkfile`, which is what most of the internet
+   suggests. That value is what tells the shell to resolve a `.lnk` to its target instead of
+   opening it as a document, and without it every taskbar pin on the machine fails with *"This
+   file does not have an app associated with it"* — Explorer's own views still work, which is what
+   makes it confusing to diagnose.
+2. Pointing the shell's shortcut overlay (`Shell Icons` override `29`) at a blank icon, on the
+   theory that the slot would still be drawn with nothing in it. Explorer instead fills it with a
+   **solid black block**, so every shortcut on the PC wears a black square where its arrow was.
+   The icon is not the problem: a generated blank `.ico` and `shell32.dll,50` both load fully
+   transparent at every size and both stay invisible in an ordinary image list. The blackening
+   happens inside the shell's own overlay image list and only at the small icon size — the very
+   same override renders correctly at 48 and 256 pixels. No icon file can steer that.
+
+The padlock badge sits on the bottom-*right* precisely so it never collides with the arrow on the
+bottom-left, so a decoy reads correctly with the arrow left alone. That is why dropping this costs
+nothing.
+
+If a PC ran either of those versions it still carries the damage after upgrading, so **Settings**
+grows a **Repair Windows shortcuts** button — only when there is something to repair. It restores
+`IsShortcut`, removes override `29`, and offers to restart Explorer, which is needed to clear the
+black squares already sitting in the icon cache.
 
 ## Recovering a folder by hand
 
